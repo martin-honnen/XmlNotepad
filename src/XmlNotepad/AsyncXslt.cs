@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using SR = XmlNotepad.StringResources;
 using System.ComponentModel;
 using System.Xml.XPath;
+using Saxon.Api;
 
 namespace XmlNotepad
 {
@@ -177,9 +178,14 @@ namespace XmlNotepad
 
     internal class AsyncXslt
     {
+        private static Processor _processor = new Processor();
+        private static XsltCompiler _compiler = _processor.NewXsltCompiler();
+        private XsltExecutable _executable;
+        private Xslt30Transformer _transformer;
         private XslCompiledTransform _xslt;
         private XmlDocument _xsltdoc;
         private XslCompiledTransform _defaultss;
+        private Xslt30Transformer _defaultTransformer;
         private Uri _xsltUri;
         private DateTime _loaded;
         private string _tempFile;
@@ -237,9 +243,10 @@ namespace XmlNotepad
             this._context.running = true;
 
             XslCompiledTransform transform;
+            Xslt30Transformer transformer;
             if (string.IsNullOrEmpty(this._context.xsltfilename))
             {
-                transform = GetDefaultStylesheet();
+                transformer = GetDefaultStylesheet();
                 this._usingDefaultXslt = true;
                 if (this._settings.GetBoolean("DisableDefaultXslt"))
                 {
@@ -254,7 +261,7 @@ namespace XmlNotepad
                 {
                     try
                     {
-                        _xslt = new XslCompiledTransform();
+                        //_xslt = new XslCompiledTransform();
                         this._loaded = DateTime.Now;
                         var settings = new XsltSettings(true, this._context.enableScripts);
                         settings.EnableScript = _trustService.CanTrustUrl(resolved) == true;
@@ -263,7 +270,9 @@ namespace XmlNotepad
                         rs.XmlResolver = this._context.resolver;
                         using (XmlReader r = XmlReader.Create(resolved.AbsoluteUri, rs))
                         {
-                            _xslt.Load(r, settings, this._context.resolver);
+                            //_xslt.Load(r, settings, this._context.resolver);
+                            _executable = _compiler.Compile(r);
+                            _transformer = _executable.Load30();
                         }
 
                         // the XSLT DOM is also handy to have around for GetOutputMethod
@@ -279,7 +288,8 @@ namespace XmlNotepad
                         throw;
                     }
                 }
-                transform = _xslt;
+                //transform = _xslt;
+                transformer = _transformer;
                 this._usingDefaultXslt = false;
             }
 
@@ -310,7 +320,7 @@ namespace XmlNotepad
                 outpath = GetWritableFileName(outpath);
             }
 
-            if (null != transform)
+            if (null != transformer)
             {
                 var dir = Path.GetDirectoryName(outpath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -327,7 +337,8 @@ namespace XmlNotepad
                 {
                     using (StringWriter writer = new StringWriter())
                     {
-                        transform.Transform(xmlReader, null, writer);
+                        using (var inputStream = File.OpenRead(context.BaseURI))
+                            transformer.Transform(inputStream, _context.baseUri, _processor.NewSerializer(writer));
                         this._xsltUri = resolved;
                         this._context.output = writer.ToString();
                     }
@@ -345,7 +356,8 @@ namespace XmlNotepad
                         // cache to an inmemory stream so we can strip the BOM.
                         using (MemoryStream ms = new MemoryStream())
                         {
-                            transform.Transform(xmlReader, null, ms);
+                            using (var inputStream = File.OpenRead(context.BaseURI))
+                                transformer.Transform(inputStream, _context.baseUri, _processor.NewSerializer(ms));
                             ms.Seek(0, SeekOrigin.Begin);
                             EncodingHelpers.WriteFileWithoutBOM(ms, outpath);
                         }
@@ -362,7 +374,8 @@ namespace XmlNotepad
                             this._context.writer = wrapper;
                             Stopwatch watch = new Stopwatch();
                             watch.Start();
-                            transform.Transform(xmlReader, null, wrapper);
+                            using (var inputStream = File.OpenRead(_context.baseUri.AbsolutePath))
+                                transformer.Transform(inputStream, _context.baseUri, _processor.NewSerializer(wrapper));
                             watch.Stop();
                             this._context.info.XsltMilliseconds = watch.ElapsedMilliseconds;
                             Debug.WriteLine("Transform in {0} milliseconds", watch.ElapsedMilliseconds);
@@ -565,11 +578,11 @@ namespace XmlNotepad
             this._tempFile = null;
         }
 
-        XslCompiledTransform GetDefaultStylesheet()
+        Xslt30Transformer GetDefaultStylesheet()
         {
             if (_defaultss != null)
             {
-                return _defaultss;
+                return _defaultTransformer;
             }
             using (Stream stream = this.GetType().Assembly.GetManifestResourceStream(_context.defaultSSResource))
             {
@@ -582,9 +595,9 @@ namespace XmlNotepad
 
                         using (XmlReader reader = XmlReader.Create(new StringReader(html)))
                         {
-                            XslCompiledTransform t = new XslCompiledTransform();
-                            t.Load(reader);
-                            _defaultss = t;
+                            var xsltDefaultExecutable = _compiler.Compile(reader);
+                            var t = xsltDefaultExecutable.Load30();
+                            _defaultTransformer = t;
                         }
                         // the XSLT DOM is also handy to have around for GetOutputMethod
                         stream.Seek(0, SeekOrigin.Begin);
@@ -597,7 +610,7 @@ namespace XmlNotepad
                     throw new Exception(string.Format("You have a build problem: resource '{0} not found", _context.defaultSSResource));
                 }
             }
-            return _defaultss;
+            return _defaultTransformer;
         }
 
         string GetDefaultStyles(string html)
